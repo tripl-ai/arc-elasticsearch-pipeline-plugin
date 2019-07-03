@@ -33,20 +33,19 @@ class ElasticsearchLoad extends PipelineStagePlugin {
     import ai.tripl.arc.config.ConfigUtils._
     implicit val c = config
 
-    val expectedKeys = "type" :: "name" :: "description" :: "environments"  :: "inputView" :: "output"  :: "numPartitions" :: "partitionBy" :: "saveMode" :: "persist" :: "params" :: Nil
+    val expectedKeys = "type" :: "name" :: "description" :: "environments"  :: "inputView" :: "output"  :: "numPartitions" :: "partitionBy" :: "saveMode" :: "params" :: Nil
     val name = getValue[String]("name")
     val description = getOptionalValue[String]("description")
     val inputView = getValue[String]("inputView")
     val output = getValue[String]("output")
-    val persist = getValue[java.lang.Boolean]("persist", default = Some(false))
     val numPartitions = getOptionalValue[Int]("numPartitions")
     val partitionBy = getValue[StringList]("partitionBy", default = Some(Nil))
     val saveMode = getValue[String]("saveMode", default = Some("Overwrite"), validValues = "Append" :: "ErrorIfExists" :: "Ignore" :: "Overwrite" :: Nil) |> parseSaveMode("saveMode") _
     val params = readMap("params", c)
     val invalidKeys = checkValidKeys(c)(expectedKeys)    
 
-    (name, description, inputView, output, persist, numPartitions, partitionBy, saveMode, invalidKeys) match {
-      case (Right(name), Right(description), Right(inputView), Right(output), Right(persist), Right(numPartitions), Right(partitionBy), Right(saveMode), Right(invalidKeys)) => 
+    (name, description, inputView, output, numPartitions, partitionBy, saveMode, invalidKeys) match {
+      case (Right(name), Right(description), Right(inputView), Right(output), Right(numPartitions), Right(partitionBy), Right(saveMode), Right(invalidKeys)) => 
 
         val stage = ElasticsearchLoadStage(
           plugin=this,
@@ -68,7 +67,7 @@ class ElasticsearchLoad extends PipelineStagePlugin {
 
         Right(stage)
       case _ =>
-        val allErrors: Errors = List(name, description, inputView, output, persist, numPartitions, partitionBy, saveMode, invalidKeys).collect{ case Left(errs) => errs }.flatten
+        val allErrors: Errors = List(name, description, inputView, output, numPartitions, partitionBy, saveMode, invalidKeys).collect{ case Left(errs) => errs }.flatten
         val stageName = stringOrDefault(name, "unnamed stage")
         val err = StageError(index, stageName, c.origin.lineNumber, allErrors)
         Left(err :: Nil)
@@ -107,7 +106,7 @@ object ElasticsearchLoadStage {
     val dropMap = new java.util.HashMap[String, Object]()
 
     // elasticsearch cannot support a column called _index
-    val unsupported = df.schema.filter( _.name == "_index").map(_.name)
+    val unsupported = df.schema.filter(_.name == "_index").map(_.name)
     if (!unsupported.isEmpty) {
       dropMap.put("Unsupported", unsupported.asJava)
     }

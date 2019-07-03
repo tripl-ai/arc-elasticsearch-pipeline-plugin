@@ -1,5 +1,5 @@
 // Your profile name of the sonatype account. The default is the same with the organization value
-sonatypeProfileName := "ai.tripl"
+sonatypeProfileName := "ai.tripl.arc-elasticsearch-pipeline-plugin"
 
 // To sync with Maven central, you need to supply the following information:
 publishMavenStyle := true
@@ -11,7 +11,7 @@ import xerial.sbt.Sonatype._
 homepage := Some(url("https://arc.tripl.ai"))
 scmInfo := Some(
   ScmInfo(
-    url("https://github.com/tripl-ai/arc"),
+    url("https://github.com/tripl-ai/arc-elasticsearch-pipeline-plugin"),
     "scm:git@github.com:tripl-ai/arc.git"
   )
 )
