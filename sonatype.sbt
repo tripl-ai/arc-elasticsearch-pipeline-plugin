@@ -12,7 +12,7 @@ homepage := Some(url("https://arc.tripl.ai"))
 scmInfo := Some(
   ScmInfo(
     url("https://github.com/tripl-ai/arc-elasticsearch-pipeline-plugin"),
-    "scm:git@github.com:tripl-ai/arc.git"
+    "scm:git@github.com:tripl-ai/arc-elasticsearch-pipeline-plugin.git"
   )
 )
 developers := List(
