@@ -20,8 +20,7 @@ import org.apache.spark.sql.functions._
 import ai.tripl.arc.api._
 import ai.tripl.arc.api.API._
 import ai.tripl.arc.util._
-import ai.tripl.arc.util.log.LoggerFactory 
-
+import ai.tripl.arc.config.ArcPipeline
 import org.elasticsearch.spark.sql._ 
 
 class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
@@ -43,7 +42,8 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
                   .config("es.index.auto.create", "true")
                   .appName("Spark ETL Test")
                   .getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
+    spark.sparkContext.setLogLevel("INFO")
+    implicit val logger = TestUtils.getLogger()
 
     // set for deterministic timezone
     spark.conf.set("spark.sql.session.timeZone", "UTC")   
@@ -52,13 +52,13 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
   }
 
   after {
-    session.stop()
+    session.stop
   }
 
   test("ElasticsearchLoad") {
     implicit val spark = session
     import spark.implicits._
-    implicit val logger = LoggerFactory.getLogger(spark.sparkContext.applicationId)
+    implicit val logger = TestUtils.getLogger()
     implicit val arcContext = TestUtils.getARCContext(isStreaming=false)
 
     val df0 = spark.read.option("header","true").csv(testData)
@@ -120,7 +120,7 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
   test("ElasticsearchLoad end-to-end") {
     implicit val spark = session
     import spark.implicits._
-    implicit val logger = LoggerFactory.getLogger(spark.sparkContext.applicationId)
+    implicit val logger = TestUtils.getLogger()
     implicit val arcContext = TestUtils.getARCContext(isStreaming=false)
 
     val df = spark.read.option("header","true").csv(testData)
@@ -148,7 +148,7 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
       ]
     }"""
     
-    val pipelineEither = ConfigUtils.parseConfig(Left(conf), arcContext)
+    val pipelineEither = ArcPipeline.parseConfig(Left(conf), arcContext)
 
     pipelineEither match {
       case Left(_) => {
