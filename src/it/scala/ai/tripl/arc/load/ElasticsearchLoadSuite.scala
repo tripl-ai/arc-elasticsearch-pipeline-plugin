@@ -4,13 +4,15 @@ import java.net.URI
 import java.util.UUID
 import java.util.Properties
 import scala.util.Random
-import org.apache.http.client.methods.HttpDelete
+import org.apache.http.client.methods.{HttpDelete, HttpGet}
 import org.apache.http.impl.client.HttpClientBuilder
+import com.fasterxml.jackson.databind.ObjectMapper
 
 import org.scalatest.FunSuite
 import org.scalatest.BeforeAndAfter
 
 import scala.collection.JavaConverters._
+import scala.io.Source
 
 import org.apache.commons.io.FileUtils
 import org.apache.commons.io.IOUtils
@@ -176,7 +178,6 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
     FileUtils.deleteQuietly(new java.io.File(checkpointLocation))
 
     val indexName = randStr(10)
-    println(indexName)
 
     val readStream = spark
       .readStream
@@ -200,8 +201,23 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
         partitionBy=Nil
       )
     )
-    Thread.sleep(30000)
+    Thread.sleep(2000)
 
     spark.streams.active.foreach(streamingQuery => streamingQuery.stop)
+
+    // call _search rest api to get all documents for new index
+    val client = HttpClientBuilder.create.build
+    val get = new HttpGet(s"http://${esURL}:${port}/${indexName}/_search")
+    val response = client.execute(get)
+    val body = Source.fromInputStream(response.getEntity.getContent).mkString
+    response.close
+
+    // assert that the documents array returned in the search is not empty
+    // if no documents then hits.hits will fail anyway
+    spark.read.json(spark.sparkContext.parallelize(Seq(body)).toDF.as[String]).createOrReplaceTempView("response")
+    val hitsSize = spark.sql("""
+    SELECT SIZE(hits.hits) FROM response
+    """)
+    assert(hitsSize.first.getInt(0) != 0)
   }
 }
