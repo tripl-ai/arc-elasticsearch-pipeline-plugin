@@ -3,14 +3,16 @@ package ai.tripl.arc
 import java.net.URI
 import java.util.UUID
 import java.util.Properties
-
-import org.apache.http.client.methods.HttpDelete
+import scala.util.Random
+import org.apache.http.client.methods.{HttpDelete, HttpGet}
 import org.apache.http.impl.client.HttpClientBuilder
+import com.fasterxml.jackson.databind.ObjectMapper
 
 import org.scalatest.FunSuite
 import org.scalatest.BeforeAndAfter
 
 import scala.collection.JavaConverters._
+import scala.io.Source
 
 import org.apache.commons.io.FileUtils
 import org.apache.commons.io.IOUtils
@@ -21,11 +23,16 @@ import ai.tripl.arc.api._
 import ai.tripl.arc.api.API._
 import ai.tripl.arc.util._
 import ai.tripl.arc.config.ArcPipeline
-import org.elasticsearch.spark.sql._ 
+import org.elasticsearch.spark.sql._
 
 class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
 
-  var session: SparkSession = _  
+
+  val alpha = "abcdefghijklmnopqrstuvwxyz"
+  val size = alpha.size
+  def randStr(n:Int) = (1 to n).map(x => alpha(Random.nextInt.abs % size)).mkString
+
+  var session: SparkSession = _
   val testData = getClass.getResource("/akc_breed_info.csv").toString
   val inputView = "expected"
   val index = "dogs"
@@ -33,6 +40,9 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
   val port = "9200"
   val wanOnly = "true"
   val ssl = "false"
+  val streamingIndex = "streaming"
+  val outputView = "outputView"
+  val checkpointLocation = "/tmp/checkpointLocation"
 
   before {
     implicit val spark = SparkSession
@@ -40,13 +50,14 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
                   .master("local[*]")
                   .config("spark.ui.port", "9999")
                   .config("es.index.auto.create", "true")
+                  .config("spark.sql.streaming.checkpointLocation", checkpointLocation)
                   .appName("Spark ETL Test")
                   .getOrCreate()
     spark.sparkContext.setLogLevel("INFO")
     implicit val logger = TestUtils.getLogger()
 
     // set for deterministic timezone
-    spark.conf.set("spark.sql.session.timeZone", "UTC")   
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
 
     session = spark
   }
@@ -65,23 +76,24 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
     df0.createOrReplaceTempView(inputView)
 
     val client = HttpClientBuilder.create.build
-    val delete = new HttpDelete(s"http://${esURL}:9200/index")
+    val delete = new HttpDelete(s"http://${esURL}:9200/${index}")
     val response = client.execute(delete)
-    response.close 
+    response.close
 
     load.ElasticsearchLoadStage.execute(
       load.ElasticsearchLoadStage(
         plugin=new load.ElasticsearchLoad,
-        name="df", 
+        name="df",
         description=None,
-        inputView=inputView, 
+        inputView=inputView,
         output=index,
         numPartitions=None,
         params=Map("es.nodes.wan.only" -> wanOnly, "es.port" -> port, "es.net.ssl" -> ssl, "es.nodes" -> esURL),
         saveMode=SaveMode.Overwrite,
+        outputMode=OutputModeTypeAppend,
         partitionBy=Nil
       )
-    )   
+    )
 
     val df1 = spark.read
       .format("org.elasticsearch.spark.sql")
@@ -110,12 +122,11 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
       println("actual")
       actual.show(100000, false)
       println("expected")
-      expected.show(100000, false)  
+      expected.show(100000, false)
     }
     assert(actualExceptExpectedCount === 0)
     assert(expectedExceptActualCount === 0)
-  } 
-
+  }
 
   test("ElasticsearchLoad end-to-end") {
     implicit val spark = session
@@ -147,7 +158,7 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
         }
       ]
     }"""
-    
+
     val pipelineEither = ArcPipeline.parseConfig(Left(conf), arcContext)
 
     pipelineEither match {
@@ -156,6 +167,57 @@ class ElasticsearchLoadSuite extends FunSuite with BeforeAndAfter {
         assert(false)
       }
       case Right((pipeline, _)) => ARC.run(pipeline)(spark, logger, arcContext)
-    }  
-  } 
+    }
+  }
+
+  test("ElasticsearchLoad: Structured Streaming") {
+    implicit val spark = session
+    import spark.implicits._
+    implicit val logger = TestUtils.getLogger()
+    implicit val arcContext = TestUtils.getARCContext(isStreaming=true)
+    FileUtils.deleteQuietly(new java.io.File(checkpointLocation))
+
+    val indexName = randStr(10)
+
+    val readStream = spark
+      .readStream
+      .format("rate")
+      .option("rowsPerSecond", "1")
+      .load
+
+    readStream.createOrReplaceTempView(inputView)
+
+    load.ElasticsearchLoadStage.execute(
+      load.ElasticsearchLoadStage(
+        plugin=new load.ElasticsearchLoad,
+        name="df",
+        description=None,
+        inputView=inputView,
+        output=indexName,
+        numPartitions=None,
+        params=Map("es.nodes.wan.only" -> wanOnly, "es.port" -> port, "es.net.ssl" -> ssl, "es.nodes" -> esURL),
+        saveMode=SaveMode.Overwrite,
+        outputMode=OutputModeTypeAppend,
+        partitionBy=Nil
+      )
+    )
+    Thread.sleep(2000)
+
+    spark.streams.active.foreach(streamingQuery => streamingQuery.stop)
+
+    // call _search rest api to get all documents for new index
+    val client = HttpClientBuilder.create.build
+    val get = new HttpGet(s"http://${esURL}:${port}/${indexName}/_search")
+    val response = client.execute(get)
+    val body = Source.fromInputStream(response.getEntity.getContent).mkString
+    response.close
+
+    // assert that the documents array returned in the search is not empty
+    // if no documents then hits.hits will fail anyway
+    spark.read.json(spark.sparkContext.parallelize(Seq(body)).toDF.as[String]).createOrReplaceTempView("response")
+    val hitsSize = spark.sql("""
+    SELECT SIZE(hits.hits) FROM response
+    """)
+    assert(hitsSize.first.getInt(0) != 0)
+  }
 }
