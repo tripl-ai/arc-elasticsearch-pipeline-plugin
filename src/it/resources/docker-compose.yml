@@ -21,7 +21,7 @@ services:
     working_dir: /app
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.0.1
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.3.2
     networks:
       - arc-integration
     ports:

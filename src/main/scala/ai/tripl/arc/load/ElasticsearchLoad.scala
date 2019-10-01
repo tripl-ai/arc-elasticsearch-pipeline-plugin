@@ -23,6 +23,7 @@ import ai.tripl.arc.util.ExtractUtils
 import ai.tripl.arc.util.MetadataUtils
 import ai.tripl.arc.util.ListenerUtils
 import ai.tripl.arc.util.Utils
+import org.apache.spark.sql.streaming.OutputMode
 
 class ElasticsearchLoad extends PipelineStagePlugin {
 
@@ -33,7 +34,7 @@ class ElasticsearchLoad extends PipelineStagePlugin {
     import ai.tripl.arc.config.ConfigUtils._
     implicit val c = config
 
-    val expectedKeys = "type" :: "name" :: "description" :: "environments"  :: "inputView" :: "output"  :: "numPartitions" :: "partitionBy" :: "saveMode" :: "params" :: Nil
+    val expectedKeys = "type" :: "name" :: "description" :: "environments"  :: "inputView" :: "output"  :: "numPartitions" :: "partitionBy" :: "saveMode" :: "params" :: "outputMode" :: Nil
     val name = getValue[String]("name")
     val description = getOptionalValue[String]("description")
     val inputView = getValue[String]("inputView")
@@ -41,11 +42,12 @@ class ElasticsearchLoad extends PipelineStagePlugin {
     val numPartitions = getOptionalValue[Int]("numPartitions")
     val partitionBy = getValue[StringList]("partitionBy", default = Some(Nil))
     val saveMode = getValue[String]("saveMode", default = Some("Overwrite"), validValues = "Append" :: "ErrorIfExists" :: "Ignore" :: "Overwrite" :: Nil) |> parseSaveMode("saveMode") _
+    val outputMode = getValue[String]("outputMode", default = Some("Append"), validValues = "Append" :: "Complete" :: "Update" :: Nil) |> parseOutputModeType("outputMode") _
     val params = readMap("params", c)
     val invalidKeys = checkValidKeys(c)(expectedKeys)    
 
-    (name, description, inputView, output, numPartitions, partitionBy, saveMode, invalidKeys) match {
-      case (Right(name), Right(description), Right(inputView), Right(output), Right(numPartitions), Right(partitionBy), Right(saveMode), Right(invalidKeys)) => 
+    (name, description, inputView, output, numPartitions, partitionBy, saveMode, invalidKeys, outputMode) match {
+      case (Right(name), Right(description), Right(inputView), Right(output), Right(numPartitions), Right(partitionBy), Right(saveMode), Right(invalidKeys), Right(outputMode)) => 
 
         val stage = ElasticsearchLoadStage(
           plugin=this,
@@ -56,7 +58,8 @@ class ElasticsearchLoad extends PipelineStagePlugin {
           params=params,
           numPartitions=numPartitions,
           partitionBy=partitionBy,
-          saveMode=saveMode
+          saveMode=saveMode,
+          outputMode=outputMode
         )
 
         stage.stageDetail.put("inputView", inputView)  
@@ -64,10 +67,11 @@ class ElasticsearchLoad extends PipelineStagePlugin {
         stage.stageDetail.put("params", params.asJava)
         stage.stageDetail.put("partitionBy", partitionBy.asJava)
         stage.stageDetail.put("saveMode", saveMode.toString.toLowerCase)
+        stage.stageDetail.put("outputMode", outputMode.sparkString)
 
         Right(stage)
       case _ =>
-        val allErrors: Errors = List(name, description, inputView, output, numPartitions, partitionBy, saveMode, invalidKeys).collect{ case Left(errs) => errs }.flatten
+        val allErrors: Errors = List(name, description, inputView, output, numPartitions, partitionBy, saveMode, invalidKeys, outputMode).collect{ case Left(errs) => errs }.flatten
         val stageName = stringOrDefault(name, "unnamed stage")
         val err = StageError(index, stageName, c.origin.lineNumber, allErrors)
         Left(err :: Nil)
@@ -84,6 +88,7 @@ case class ElasticsearchLoadStage(
     partitionBy: List[String], 
     numPartitions: Option[Int], 
     saveMode: SaveMode, 
+    outputMode: OutputModeType,
     params: Map[String, String]
   ) extends PipelineStage {
 
@@ -94,13 +99,15 @@ case class ElasticsearchLoadStage(
 
 object ElasticsearchLoadStage {
 
-  def execute(stage: ElasticsearchLoadStage)(implicit spark: SparkSession, logger: ai.tripl.arc.util.log.logger.Logger): Option[DataFrame] = {
+  def execute(stage: ElasticsearchLoadStage)(implicit spark: SparkSession, logger: ai.tripl.arc.util.log.logger.Logger, arcContext: ARCContext): Option[DataFrame] = {
 
     val df = spark.table(stage.inputView)      
 
-    stage.numPartitions match {
-      case Some(partitions) => stage.stageDetail.put("numPartitions", Integer.valueOf(partitions))
-      case None => stage.stageDetail.put("numPartitions", Integer.valueOf(df.rdd.getNumPartitions))
+    if (!df.isStreaming) {
+      stage.numPartitions match {
+        case Some(partitions) => stage.stageDetail.put("numPartitions", Integer.valueOf(partitions))
+        case None => stage.stageDetail.put("numPartitions", Integer.valueOf(df.rdd.getNumPartitions))
+      }
     }
 
     val dropMap = new java.util.HashMap[String, Object]()
@@ -119,23 +126,28 @@ object ElasticsearchLoadStage {
 
     // Elasticsearch will convert date and times to epoch milliseconds
     val outputDF = try {
-      stage.partitionBy match {
-        case Nil =>
-          val dfToWrite = stage.numPartitions.map(nonNullDF.repartition(_)).getOrElse(nonNullDF)
-          dfToWrite.write.options(stage.params).mode(stage.saveMode).format("org.elasticsearch.spark.sql").save(stage.output)
-          dfToWrite
-        case partitionBy => {
-          // create a column array for repartitioning
-          val partitionCols = partitionBy.map(col => nonNullDF(col))
-          stage.numPartitions match {
-            case Some(n) =>
-              val dfToWrite = nonNullDF.repartition(n, partitionCols:_*)
-              dfToWrite.write.options(stage.params).partitionBy(partitionBy:_*).mode(stage.saveMode).format("org.elasticsearch.spark.sql").save(stage.output)
-              dfToWrite
-            case None =>
-              val dfToWrite = nonNullDF.repartition(partitionCols:_*)
-              dfToWrite.write.options(stage.params).partitionBy(partitionBy:_*).mode(stage.saveMode).format("org.elasticsearch.spark.sql").save(stage.output)
-              dfToWrite
+      if (arcContext.isStreaming) {
+        nonNullDF.writeStream.options(stage.params).outputMode(stage.outputMode.sparkString).format("es").start(stage.output)
+        nonNullDF
+      } else {
+        stage.partitionBy match {
+          case Nil =>
+            val dfToWrite = stage.numPartitions.map(nonNullDF.repartition(_)).getOrElse(nonNullDF)
+            dfToWrite.write.options(stage.params).mode(stage.saveMode).format("org.elasticsearch.spark.sql").save(stage.output)
+            dfToWrite
+          case partitionBy => {
+            // create a column array for repartitioning
+            val partitionCols = partitionBy.map(col => nonNullDF(col))
+            stage.numPartitions match {
+              case Some(n) =>
+                val dfToWrite = nonNullDF.repartition(n, partitionCols:_*)
+                dfToWrite.write.options(stage.params).partitionBy(partitionBy:_*).mode(stage.saveMode).format("org.elasticsearch.spark.sql").save(stage.output)
+                dfToWrite
+              case None =>
+                val dfToWrite = nonNullDF.repartition(partitionCols:_*)
+                dfToWrite.write.options(stage.params).partitionBy(partitionBy:_*).mode(stage.saveMode).format("org.elasticsearch.spark.sql").save(stage.output)
+                dfToWrite
+            }
           }
         }
       }

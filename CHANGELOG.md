@@ -1,5 +1,10 @@
 ## Change Log
 
+# 1.2.0
+
+- add streaming support to `ElasticsearchLoad`
+- update to ElasticSearch 7.3.2.
+
 # 1.1.1
 
 - update to Spark 2.4.4
