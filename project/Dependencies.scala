@@ -16,7 +16,7 @@ object Dependencies {
   val sparkHive = "org.apache.spark" %% "spark-hive" % sparkVersion % "provided" 
 
   // elasticsearch
-  val elasticsearch = "org.elasticsearch" % "elasticsearch-hadoop" % "7.3.2"
+  val elasticsearch = "org.elasticsearch" % "elasticsearch-hadoop" % "7.6.1"
 
   // Project
   val etlDeps = Seq(
